@@ -1,0 +1,13 @@
+.gradle/
+build/
+**/build/
+local.properties
+*.apk
+*.aab
+captures/
+.cxx/
+
+# Signing material. The keystore and its passwords never enter the repository.
+keystore.properties
+*.jks
+*.keystore

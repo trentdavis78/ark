@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The offer log is the driver's own business record. It stays on the device:
+     no cloud backup, no device-transfer copy. -->
+<data-extraction-rules>
+    <cloud-backup><exclude domain="root" /></cloud-backup>
+    <device-transfer><exclude domain="root" /></device-transfer>
+</data-extraction-rules>

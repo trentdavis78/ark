@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">BLACKTOP</string>
+    <string name="accessibility_label">BLACKTOP offer reader</string>
+    <string name="accessibility_description">Reads the offer card already on your screen so BLACKTOP can score it. It only ever reads, and only from delivery apps — it cannot tap, accept, or decline anything. Every decision stays yours.</string>
+    <string name="hud_channel">Verdict overlay</string>
+    <string name="hud_running">BLACKTOP is scoring offers</string>
+</resources>

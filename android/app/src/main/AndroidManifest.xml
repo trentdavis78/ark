@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      The permission set is deliberately small, and what is *absent* matters as
+      much as what is present. There is no INTERNET-dependent platform call, no
+      account permission, and nothing that could inject input. BLACKTOP reads
+      what is already on this driver's screen and draws a recommendation over
+      it; the human taps (I3/I4).
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Only for the optional vision fallback, which reaches BLACKTOP's own
+         endpoint and nothing else. Never a platform server (I2). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:name=".BlacktopApp"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/Theme.Blacktop"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Read-only. The service declares canRetrieveWindowContent and nothing
+          else: no gesture capability, no input injection. See
+          accessibility_service_config.xml and docs/COMPLIANCE.md.
+        -->
+        <service
+            android:name=".capture.OfferCaptureService"
+            android:exported="true"
+            android:label="@string/accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <service
+            android:name=".hud.HudService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Draws the driving-safe verdict overlay for the current offer." />
+        </service>
+    </application>
+</manifest>
