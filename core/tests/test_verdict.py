@@ -12,7 +12,8 @@ NOW = datetime(2026, 8, 18, 18, 0)
 def rate(hourly=33.0):
     per_min = hourly / 60.0
     return RateDecision(w_star_per_min=per_min, hourly=hourly, raw_w_per_min=per_min,
-                        decay_factor=1.0, ar_adjustment_per_min=0.0, clamped=False,
+                        decay_factor=1.0, ar_adjustment_per_min=0.0,
+                        out_of_band=False, floor_applied=False,
                         arrival_rate_per_min=0.5, sample_n=20)
 
 

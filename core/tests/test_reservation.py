@@ -20,17 +20,44 @@ def obs_stream(n=20, seed=1, gap_min=1.0, lo=4.0, hi=15.0, dlo=8.0, dhi=30.0):
 
 
 class TestRollingWindow:
-    def test_eviction(self):
-        w = RollingOfferWindow(window_minutes=20)
+    def test_prefers_fresh_when_window_has_enough(self):
+        w = RollingOfferWindow(window_minutes=20, min_samples=3)
+        w.observe(OfferObservation(T0, 10, 20))                      # stale
+        for i in range(3):
+            w.observe(OfferObservation(T0 + timedelta(minutes=25 + i), 10, 20))
+        snap = w.snapshot(T0 + timedelta(minutes=27))
+        assert len(snap) == 3
+        assert all(o.seen_at > T0 for o in snap)
+
+    def test_reaches_back_when_window_is_thin(self):
+        # A busy driver sees almost nothing inside the nominal window. Rather
+        # than starve the solve, the window reaches back for min_samples.
+        w = RollingOfferWindow(window_minutes=20, min_samples=4)
+        for i in range(4):
+            w.observe(OfferObservation(T0 + timedelta(minutes=i), 10, 20))
+        w.observe(OfferObservation(T0 + timedelta(minutes=90), 10, 20))
+        snap = w.snapshot(T0 + timedelta(minutes=92))
+        assert len(snap) == 4
+
+    def test_evicts_beyond_retention(self):
+        w = RollingOfferWindow(window_minutes=20, min_samples=2, retain_minutes=60)
         w.observe(OfferObservation(T0, 10, 20))
-        w.observe(OfferObservation(T0 + timedelta(minutes=25), 10, 20))
-        assert len(w.snapshot(T0 + timedelta(minutes=25))) == 1
+        w.observe(OfferObservation(T0 + timedelta(minutes=200), 10, 20))
+        assert len(w.snapshot(T0 + timedelta(minutes=200))) == 1
 
     def test_arrival_rate(self):
         w = RollingOfferWindow(window_minutes=30)
         for i in range(15):
             w.observe(OfferObservation(T0 + timedelta(minutes=2 * i), 10, 20))
         assert w.arrival_rate_per_min(T0 + timedelta(minutes=29)) == pytest.approx(0.5)
+
+    def test_arrival_rate_uses_true_span_when_reaching_back(self):
+        # 5 offers over 100 minutes must read as 0.05/min, not 5/30.
+        w = RollingOfferWindow(window_minutes=30, min_samples=5)
+        for i in range(5):
+            w.observe(OfferObservation(T0 + timedelta(minutes=i * 25), 10, 20))
+        lam = w.arrival_rate_per_min(T0 + timedelta(minutes=100))
+        assert lam == pytest.approx(5 / 100.0)
 
     def test_window_bounds_validated(self):
         with pytest.raises(ValueError):
@@ -151,6 +178,29 @@ class TestEngine:
         assert d.sample_n == 0
         assert any("cold start" in n for n in d.notes)
 
+    def test_thin_window_pools_instead_of_snapping_to_prior(self):
+        # The starvation bug: at high utilization the window holds 2-3 offers
+        # and a hard cold-start switch pinned w* to the constant prior forever,
+        # which declines every offer a lean market can produce. Pooling must
+        # move the estimate toward the evidence.
+        eng = ReservationRateEngine(prior_w_per_min=0.50, min_samples=5)
+        for i in range(3):
+            eng.observe(OfferObservation(T0 + timedelta(minutes=i * 8), 6.0, 30.0))
+        d = eng.current_rate(T0 + timedelta(minutes=20))
+        assert d.w_star_per_min < 0.50
+        assert any("thin window" in n for n in d.notes)
+
+    def test_learned_prior_overrides_the_constant(self):
+        eng = ReservationRateEngine(prior_w_per_min=0.50,
+                                    prior_provider=lambda now: 0.22)
+        d = eng.current_rate(T0)
+        assert d.w_star_per_min == pytest.approx(0.22)
+
+    def test_prior_provider_none_falls_back_to_constant(self):
+        eng = ReservationRateEngine(prior_w_per_min=0.40,
+                                    prior_provider=lambda now: None)
+        assert eng.current_rate(T0).w_star_per_min == pytest.approx(0.40)
+
     def test_warm_rate_in_band_and_hourly_consistent(self):
         eng = ReservationRateEngine()
         for o in obs_stream(30, seed=7, gap_min=0.9):
@@ -159,16 +209,37 @@ class TestEngine:
         lo, hi = SANITY_BAND_PER_MIN
         assert lo <= d.w_star_per_min <= hi
         assert d.hourly == pytest.approx(d.w_star_per_min * 60)
-        assert not d.clamped
+        assert not d.out_of_band
 
-    def test_sanity_clamp_flags_upstream_problem(self):
-        # Absurdly rich stream forces w above the band -> clamped True.
+    def test_sanity_band_flags_but_does_not_override(self):
+        # Absurdly rich stream forces w above the band. The band is a
+        # diagnostic (PRD F6): it must flag the anomaly and leave w* alone.
+        # Overriding it with the band edge would reinstate a fixed threshold.
         eng = ReservationRateEngine()
         for i in range(30):
             eng.observe(OfferObservation(T0 + timedelta(minutes=i * 0.5), 40.0, 10.0))
         d = eng.current_rate(T0 + timedelta(minutes=15))
-        assert d.clamped
-        assert d.w_star_per_min == SANITY_BAND_PER_MIN[1]
+        assert d.out_of_band
+        assert d.w_star_per_min > SANITY_BAND_PER_MIN[1]
+        assert any("outside sanity band" in n for n in d.notes)
+
+    def test_lean_market_rate_is_not_floored_to_the_band(self):
+        # A genuinely lean stream (~$0.18/min) must produce a low w*, not the
+        # band floor -- otherwise the engine declines every offer available.
+        eng = ReservationRateEngine()
+        for i in range(30):
+            eng.observe(OfferObservation(T0 + timedelta(minutes=i * 2.0), 5.4, 30.0))
+        d = eng.current_rate(T0 + timedelta(minutes=58))
+        assert d.w_star_per_min < SANITY_BAND_PER_MIN[0]
+        assert d.out_of_band and not d.floor_applied
+
+    def test_marginal_cost_floor_binds(self):
+        eng = ReservationRateEngine(marginal_cost_per_min=0.25)
+        for i in range(30):
+            eng.observe(OfferObservation(T0 + timedelta(minutes=i * 2.0), 3.0, 30.0))
+        d = eng.current_rate(T0 + timedelta(minutes=58))
+        assert d.floor_applied
+        assert d.w_star_per_min == pytest.approx(0.25)
 
     def test_decay_lowers_rate_near_session_end(self):
         eng = ReservationRateEngine()

@@ -38,10 +38,12 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Callable
 
 SANITY_BAND_PER_MIN = (0.30, 0.85)
 DEFAULT_WINDOW_MINUTES = 30.0          # PRD: 20-40 minute rolling window
 DEFAULT_DECAY_HORIZON_MINUTES = 45.0   # start decaying w inside this horizon
+MIN_AVAILABLE_MINUTES = 1.0            # floor on the lambda denominator
 
 
 @dataclass(frozen=True)
@@ -76,7 +78,8 @@ class RateDecision:
     raw_w_per_min: float                  # optimal-stopping solution pre-layers
     decay_factor: float
     ar_adjustment_per_min: float          # <= 0
-    clamped: bool                         # True => left the sanity band (upstream bug signal)
+    out_of_band: bool                     # left the sanity band => upstream bug signal
+    floor_applied: bool                   # marginal-cost floor bound the rate
     arrival_rate_per_min: float
     sample_n: int
     notes: tuple[str, ...] = ()
@@ -84,30 +87,102 @@ class RateDecision:
 
 class RollingOfferWindow:
     """Rolling estimate of the offer value distribution and arrival rate for
-    the current context. Feed every offer seen — declines included."""
+    the current context. Feed every offer seen — declines included.
 
-    def __init__(self, window_minutes: float = DEFAULT_WINDOW_MINUTES) -> None:
+    Starvation
+    ----------
+    A working driver only *sees* offers while idle, so at high utilization a
+    strict 20-40 minute wall window holds two or three observations and the
+    optimal-stopping solve never has enough data to run. Reaching for a
+    constant prior in that state silently turns the engine back into a fixed
+    threshold, which is the failure mode this whole module exists to avoid.
+
+    So the window is time-bounded *and* sample-bounded: it keeps recent
+    history up to ``retain_minutes`` and, when the nominal window is thin,
+    reaches further back for up to ``min_samples`` observations. ``span_minutes``
+    reports the true elapsed span of whatever was returned, so the arrival
+    rate is always computed over the period the samples actually cover.
+    """
+
+    def __init__(self, window_minutes: float = DEFAULT_WINDOW_MINUTES,
+                 min_samples: int = 5,
+                 retain_minutes: float = 240.0) -> None:
         if not (15.0 <= window_minutes <= 60.0):
             raise ValueError("window_minutes should be in [15, 60]")
         self.window = timedelta(minutes=window_minutes)
+        self.retain = timedelta(minutes=max(retain_minutes, window_minutes))
+        self.min_samples = min_samples
         self._obs: deque[OfferObservation] = deque()
+        self._unavailable: deque[tuple[datetime, datetime]] = deque()
 
     def observe(self, obs: OfferObservation) -> None:
         self._obs.append(obs)
         self._evict(obs.seen_at)
 
+    def note_unavailable(self, start: datetime, end: datetime) -> None:
+        """Record an interval the driver was on a delivery and could not be
+        offered work. This is the denominator correction for ``lambda``: it is
+        the driver's own session timeline, not platform data (I5)."""
+        if end > start:
+            self._unavailable.append((start, end))
+
     def _evict(self, now: datetime) -> None:
-        cutoff = now - self.window
+        """Drop beyond the retention horizon, never merely beyond the window —
+        the extra history is what rescues a starved window."""
+        cutoff = now - self.retain
         while self._obs and self._obs[0].seen_at < cutoff:
             self._obs.popleft()
+        while self._unavailable and self._unavailable[0][1] < cutoff:
+            self._unavailable.popleft()
 
     def snapshot(self, now: datetime) -> list[OfferObservation]:
         self._evict(now)
-        return list(self._obs)
+        cutoff = now - self.window
+        fresh = [o for o in self._obs if o.seen_at >= cutoff]
+        if len(fresh) >= self.min_samples:
+            return fresh
+        # Thin: reach back for the most recent min_samples, however old.
+        return list(self._obs)[-self.min_samples:]
+
+    def _span_start(self, now: datetime) -> datetime:
+        """Start of the period ``snapshot`` actually covers: the nominal window
+        when fresh data suffices, extended when the window had to reach back."""
+        obs = self.snapshot(now)
+        nominal_start = now - self.window
+        if len(obs) < 2:
+            return nominal_start
+        return min(obs[0].seen_at, nominal_start)
+
+    def span_minutes(self, now: datetime) -> float:
+        return max((now - self._span_start(now)).total_seconds() / 60.0, MIN_AVAILABLE_MINUTES)
+
+    def available_minutes(self, now: datetime) -> float:
+        """Minutes in the span during which an offer could actually have been
+        received — elapsed time minus time spent on deliveries."""
+        start = self._span_start(now)
+        elapsed = (now - start).total_seconds() / 60.0
+        busy = 0.0
+        for b0, b1 in self._unavailable:
+            lo, hi = max(b0, start), min(b1, now)
+            if hi > lo:
+                busy += (hi - lo).total_seconds() / 60.0
+        return max(elapsed - busy, MIN_AVAILABLE_MINUTES)
 
     def arrival_rate_per_min(self, now: datetime) -> float:
+        """Offers seen per minute *available*.
+
+        Dividing by elapsed time instead understates lambda for any driver who
+        is actually working: offers arriving mid-delivery are never seen. That
+        understatement lengthens the modeled wait for a better draw, depresses
+        the reservation rate, and makes the engine accept offers it should
+        decline -- measured at roughly 15 points of excess acceptance in every
+        zone before this correction. The busy intervals come from the driver's
+        own session timeline, so no platform data is involved (I2, I5).
+        """
         obs = self.snapshot(now)
-        return len(obs) / self.window.total_seconds() * 60.0
+        if not obs:
+            return 0.0
+        return len(obs) / self.available_minutes(now)
 
     def __len__(self) -> int:
         return len(self._obs)
@@ -180,37 +255,97 @@ def completion_risk(projected_minutes: float,
 
 
 class ReservationRateEngine:
-    """Maintains the rolling window and produces the layered RateDecision."""
+    """Maintains the rolling windows and produces the layered RateDecision.
+
+    Context
+    -------
+    PRD F6 scopes the rolling estimate to "the current hex cluster x hour x
+    weather bucket". That scoping is load-bearing, not decorative: a single
+    global window lets a dense corridor's offer distribution set the threshold
+    for a sparse one, and the sparse zone then declines everything it is
+    offered. Windows are therefore keyed by context string. Hour is left to
+    recency -- a 20-40 minute window is inside one hour by construction --
+    so callers key on hex cluster and weather.
+    """
 
     def __init__(self,
                  window_minutes: float = DEFAULT_WINDOW_MINUTES,
                  prior_w_per_min: float = 0.50,
                  min_samples: int = 5,
-                 sanity_band: tuple[float, float] = SANITY_BAND_PER_MIN) -> None:
-        self.window = RollingOfferWindow(window_minutes)
+                 shrinkage_k: float = 4.0,
+                 prior_provider: Callable[[datetime], float | None] | None = None,
+                 sanity_band: tuple[float, float] = SANITY_BAND_PER_MIN,
+                 marginal_cost_per_min: float = 0.0) -> None:
+        self.window_minutes = window_minutes
+        self._windows: dict[str, RollingOfferWindow] = {}
         self.prior_w_per_min = prior_w_per_min
         self.min_samples = min_samples
+        # Partial pooling toward the prior, the same shrinkage F2 uses. A hard
+        # cold-start switch to a constant is what starved the rate in practice;
+        # pooling degrades smoothly and washes the prior out as data arrives.
+        self.shrinkage_k = shrinkage_k
+        # Context-specific prior (hex x hour x weather) learned from the
+        # driver's own history. Falls back to the constant when unavailable.
+        self.prior_provider = prior_provider
+        # Diagnostic only. PRD F6 states the band as an expectation about
+        # where w* should land -- "if it leaves that band, something is wrong
+        # upstream" -- not as a policy override. Clamping w* to a constant
+        # would silently reinstate the fixed threshold this engine exists to
+        # replace, and in a genuinely lean market it declines everything.
         self.sanity_band = sanity_band
+        # The one economically correct floor: never recommend an offer that
+        # does not clear the marginal cost of driving it. Opportunity cost of
+        # waiting is already inside the optimal-stopping solution.
+        self.marginal_cost_per_min = marginal_cost_per_min
 
-    def observe(self, obs: OfferObservation) -> None:
-        self.window.observe(obs)
+    @property
+    def window(self) -> RollingOfferWindow:
+        """The default-context window (single-context callers and tests)."""
+        return self._window_for("")
+
+    def _window_for(self, context: str) -> RollingOfferWindow:
+        win = self._windows.get(context)
+        if win is None:
+            win = RollingOfferWindow(self.window_minutes, min_samples=self.min_samples)
+            self._windows[context] = win
+        return win
+
+    def observe(self, obs: OfferObservation, context: str = "") -> None:
+        self._window_for(context).observe(obs)
+
+    def note_unavailable(self, start: datetime, end: datetime,
+                         context: str = "") -> None:
+        """Mark a delivery interval so lambda is measured per minute available."""
+        self._window_for(context).note_unavailable(start, end)
+
+    def _prior_for(self, now: datetime) -> float:
+        if self.prior_provider is not None:
+            p = self.prior_provider(now)
+            if p is not None and p > 0.0:
+                return p
+        return self.prior_w_per_min
 
     def current_rate(self,
                      now: datetime,
                      remaining_session_minutes: float | None = None,
-                     ar: ARPolicyInputs | None = None) -> RateDecision:
-        obs = self.window.snapshot(now)
-        lam = self.window.arrival_rate_per_min(now)
+                     ar: ARPolicyInputs | None = None,
+                     context: str = "") -> RateDecision:
+        win = self._window_for(context)
+        obs = win.snapshot(now)
+        lam = win.arrival_rate_per_min(now)
         notes: list[str] = []
 
-        if len(obs) < self.min_samples:
-            raw = self.prior_w_per_min
-            notes.append(f"cold start: {len(obs)} samples < {self.min_samples}, using prior")
+        prior = self._prior_for(now)
+        solved = solve_w_star(obs, lam) if len(obs) >= 2 else 0.0
+        n = len(obs)
+        if solved <= 0.0:
+            raw = prior
+            notes.append(f"cold start: {n} usable samples, using prior {prior:.3f}/min")
         else:
-            raw = solve_w_star(obs, lam)
-            if raw <= 0.0:
-                raw = self.prior_w_per_min
-                notes.append("degenerate window, using prior")
+            raw = (n * solved + self.shrinkage_k * prior) / (n + self.shrinkage_k)
+            if n < self.min_samples:
+                notes.append(f"thin window: {n} samples, pooled {solved:.3f} "
+                             f"toward prior {prior:.3f}")
 
         decay = session_end_decay(remaining_session_minutes)
         if decay < 1.0:
@@ -222,14 +357,19 @@ class ReservationRateEngine:
             notes.append(ar_note)
         w += ar_adj
 
+        floor_applied = w < self.marginal_cost_per_min
+        if floor_applied:
+            notes.append(f"marginal-cost floor: {w:.3f} -> {self.marginal_cost_per_min:.3f}/min")
+            w = self.marginal_cost_per_min
+
         lo, hi = self.sanity_band
-        clamped = not (lo <= w <= hi)
-        if clamped:
-            notes.append(f"sanity clamp: {w:.3f}/min outside [{lo}, {hi}] — check upstream")
-            w = min(max(w, lo), hi)
+        out_of_band = not (lo <= w <= hi)
+        if out_of_band:
+            notes.append(f"outside sanity band: {w:.3f}/min not in [{lo}, {hi}] — check upstream")
 
         return RateDecision(
             w_star_per_min=w, hourly=w * 60.0, raw_w_per_min=raw,
-            decay_factor=decay, ar_adjustment_per_min=ar_adj, clamped=clamped,
+            decay_factor=decay, ar_adjustment_per_min=ar_adj,
+            out_of_band=out_of_band, floor_applied=floor_applied,
             arrival_rate_per_min=lam, sample_n=len(obs), notes=tuple(notes),
         )
