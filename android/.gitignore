@@ -6,3 +6,8 @@ local.properties
 *.aab
 captures/
 .cxx/
+
+# Signing material. The keystore and its passwords never enter the repository.
+keystore.properties
+*.jks
+*.keystore

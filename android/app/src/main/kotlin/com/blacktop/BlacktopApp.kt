@@ -4,6 +4,7 @@ import android.app.Application
 import com.blacktop.capture.ScreenCapture
 import com.blacktop.capture.VisionFallback
 import com.blacktop.data.DriverSession
+import com.blacktop.data.CaptureDiagnostics
 import com.blacktop.data.OfferLog
 import com.blacktop.data.Telemetry
 import com.blacktop.hud.HudService
@@ -25,6 +26,8 @@ class BlacktopApp : Application() {
         private set
     lateinit var telemetry: Telemetry
         private set
+    lateinit var diagnostics: CaptureDiagnostics
+        private set
     lateinit var screenCapture: ScreenCapture
         private set
     lateinit var visionFallback: VisionFallback
@@ -37,6 +40,7 @@ class BlacktopApp : Application() {
         offerLog = OfferLog(this)
         session = DriverSession(this, offerLog)
         telemetry = Telemetry()
+        diagnostics = CaptureDiagnostics()
         screenCapture = ScreenCapture(this, scope)
         visionFallback = VisionFallback(
             screenCapture = screenCapture,

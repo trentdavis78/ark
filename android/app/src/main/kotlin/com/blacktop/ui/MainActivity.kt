@@ -51,11 +51,14 @@ class MainActivity : ComponentActivity() {
                 surface = Color(0xFF14181C),
             )) {
                 var consented by remember { mutableStateOf(readConsent()) }
+                var showDiagnostics by remember { mutableStateOf(false) }
                 if (!consented) {
                     ConsentScreen(onAccept = {
                         writeConsent()
                         consented = true
                     })
+                } else if (showDiagnostics) {
+                    DiagnosticsScreen(app = app, onBack = { showDiagnostics = false })
                 } else {
                     HomeScreen(
                         app = app,
@@ -70,6 +73,7 @@ class MainActivity : ComponentActivity() {
                         onEnableVision = {
                             projectionLauncher.launch(app.screenCapture.consentIntent())
                         },
+                        onOpenDiagnostics = { showDiagnostics = true },
                     )
                 }
             }
@@ -139,6 +143,7 @@ private fun HomeScreen(
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onEnableVision: () -> Unit,
+    onOpenDiagnostics: () -> Unit,
 ) {
     val context = LocalContextCompat()
     var online by remember { mutableStateOf(app.session.isOnline) }
@@ -204,6 +209,15 @@ private fun HomeScreen(
                 }
             }
         }
+
+        SetupCard(
+            title = "Reader diagnostics",
+            body = "Shows the raw text the reader got from each card, and what the parser " +
+                   "made of it. Start here — it is how we find out whether capture works " +
+                   "on your phone at all.",
+            action = "Open diagnostics",
+            onClick = onOpenDiagnostics,
+        )
 
         ManualEntryCard(app)
 

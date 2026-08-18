@@ -40,7 +40,9 @@ class OfferCaptureService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         val app = application as? BlacktopApp ?: return
-        if (!app.session.isOnline) return
+        // Diagnostics run while parked, before going online — testing whether
+        // capture works at all must not require starting a shift.
+        if (!app.session.isOnline && !app.diagnostics.enabled) return
 
         val now = System.currentTimeMillis()
         if (now - lastEventAtMs < DEBOUNCE_MS) return
@@ -69,6 +71,9 @@ class OfferCaptureService : AccessibilityService() {
             knownCapValue = app.session.tips.capDetector.capValue,
             source = CaptureSource.ACCESSIBILITY_NODES,
         )
+
+        app.diagnostics.record(platform, text, parsed)
+        if (!app.session.isOnline) return
 
         if (!parsed.usable) {
             // Not necessarily a failure — most window updates are not offer
