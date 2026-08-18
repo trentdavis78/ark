@@ -220,10 +220,12 @@ class Market:
         base += 0.18 * max(0.0, road_miles - 4.0)
         peak = self.peak_pay_dinner if rush and rng.random() < 0.45 else 0.0
 
-        true_total = base + peak + tip
-        displayed = min(true_total, self.display_cap)
+        # Money is whole cents everywhere, so the displayed figure and the
+        # concealed remainder reconcile exactly against the true payout.
+        true_total = round(base + peak + tip, 2)
+        displayed = round(min(true_total, self.display_cap), 2)
         at_cap = true_total > self.display_cap
-        hidden = true_total - displayed
+        hidden = round(true_total - displayed, 2)
 
         dest_class = self._draw_dest(zone)
         to_merchant = max(1.0, rng.gauss(3.5, 1.3)) if zone.key != "sparse" else max(2.0, rng.gauss(8.5, 3.0))
@@ -247,7 +249,7 @@ class Market:
             offer_id=offer_id,
             platform=Platform.DOORDASH,
             seen_at=when,
-            displayed_payout=round(displayed, 2),
+            displayed_payout=displayed,
             merchant_name=merchant.name,
             merchant_id=merchant.merchant_id,
             dropoff_address=f"{rng.randint(1, 900)} {zone.label} #{rng.randint(1, 40)}",

@@ -154,13 +154,37 @@ def _merge(results: list[ShiftResult], name: str) -> ShiftResult:
     )
 
 
+@dataclass
+class OraclePolicy:
+    """Clairvoyant fixed-threshold policy: accepts on the *realized* value
+    rate. Not a competitor -- a ceiling. It answers "how much of the gain a
+    perfect threshold could capture did the engine actually get?", which is
+    the only way to tell an estimation problem from an absent opportunity.
+    """
+    threshold_per_min: float
+    name: str = "oracle"
+
+    def decide(self, so: SimOffer, remaining_minutes: float) -> bool:
+        return so.truth.realized_rate_per_min >= self.threshold_per_min
+
+    def observe_seen(self, so: SimOffer) -> None:
+        return None
+
+    def observe_completed(self, so: SimOffer) -> None:
+        return None
+
+
+DEFAULT_ORACLE_GRID = (0.0, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
+
+
 def run_season(days: int = 30,
                hours_per_shift: float = 8.0,
                seed: int = 20260818,
                first_day: datetime | None = None,
                warmup_days: int = 5,
                zones: tuple[str, ...] = ("dense", "suburban", "sparse"),
-               ) -> tuple[Comparison, dict[str, Comparison], BlacktopPolicy]:
+               challenger=None,
+               ) -> tuple[Comparison, dict[str, Comparison], Policy]:
     """Run a matched season: identical offer streams, two policies.
 
     ``warmup_days`` reproduces PRD Phase 0 — the driver runs their old
@@ -171,7 +195,9 @@ def run_season(days: int = 30,
     first_day = first_day or datetime(2026, 8, 3, 11, 0)   # a Monday
     market = Market(seed=seed)
     baseline = DollarPerMilePolicy()
-    blacktop = BlacktopPolicy(marginal_cost_per_min=MARGINAL_COST_PER_MIN)
+    blacktop = (challenger() if challenger is not None
+                else BlacktopPolicy(marginal_cost_per_min=MARGINAL_COST_PER_MIN))
+    learns = isinstance(blacktop, BlacktopPolicy)
 
     per_zone_base: dict[str, list[ShiftResult]] = {z: [] for z in zones}
     per_zone_bt: dict[str, list[ShiftResult]] = {z: [] for z in zones}
@@ -182,11 +208,13 @@ def run_season(days: int = 30,
             start = first_day + timedelta(days=day)
             end = start + timedelta(hours=hours_per_shift)
             stream = market.stream(zone, start, end, prefix=f"d{day}")
-            blacktop.record_presence(zone.hex_id, start, hours_per_shift)
+            if learns:
+                blacktop.record_presence(zone.hex_id, start, hours_per_shift)
 
             if day < warmup_days:
                 # Phase 0: old heuristic drives; BLACKTOP observes only.
-                _run_warmup(stream, baseline, blacktop, start, end)
+                if learns:
+                    _run_warmup(stream, baseline, blacktop, start, end)
                 continue
 
             per_zone_base[zkey].append(run_shift(stream, baseline, start, end))
@@ -201,6 +229,27 @@ def run_season(days: int = 30,
         _merge([r for z in zones for r in per_zone_bt[z]], blacktop.name),
     )
     return overall, by_zone, blacktop
+
+
+def oracle_frontier(days: int = 30, hours_per_shift: float = 8.0,
+                    seed: int = 20260818, first_day: datetime | None = None,
+                    warmup_days: int = 5,
+                    zones: tuple[str, ...] = ("dense", "suburban", "sparse"),
+                    grid: tuple[float, ...] = DEFAULT_ORACLE_GRID,
+                    ) -> dict[str, tuple[float, ShiftResult]]:
+    """Best fixed threshold per zone, chosen with hindsight over the same
+    season. Returns {zone_key: (threshold, result)}."""
+    best: dict[str, tuple[float, ShiftResult]] = {}
+    for w in grid:
+        _, by_zone, _ = run_season(days=days, hours_per_shift=hours_per_shift,
+                                   seed=seed, first_day=first_day,
+                                   warmup_days=warmup_days, zones=zones,
+                                   challenger=lambda: OraclePolicy(w))
+        for zk, comp in by_zone.items():
+            cur = best.get(zk)
+            if cur is None or comp.blacktop.net_hourly > cur[1].net_hourly:
+                best[zk] = (w, comp.blacktop)
+    return best
 
 
 def _run_warmup(stream: list[SimOffer], baseline: DollarPerMilePolicy,
