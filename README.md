@@ -41,7 +41,7 @@ from the next offer.
 | Path | What it is | Verified |
 |---|---|---|
 | `android/domain` | The engine. Pure Kotlin, no Android dependencies, unit-tests in a plain JVM. | 60 tests |
-| `android/app` | The client: capture, HUD overlay, TTS, consent, manual entry. | assembles debug + release (R8 clean) |
+| `android/app` | The client: capture, HUD overlay, TTS, consent, diagnostics, manual entry. | 10 tests; assembles debug + signed release (R8 clean) |
 | `server/` | Vision extraction endpoint. The only place an API key exists. | typecheck + 10 tests |
 | `core/` | Python reference implementation, plus the shift simulator that measures whether any of it works. Stdlib only. | 219 tests |
 | `db/schema.sql` | Postgres + PostGIS schema with row-level security, per PRD §8. | parsed by libpg_query |
@@ -63,9 +63,14 @@ gradle :domain:test          # 60 tests
 The app does. With `ANDROID_HOME` set (or `sdk.dir` in `local.properties`):
 
 ```bash
-gradle :app:assembleDebug
-gradle :app:assembleRelease  # R8-minified, ~2.3 MB
+gradle :app:assembleDebug        # debug-signed, installable as-is
+gradle :app:testDebugUnitTest    # 10 tests
+gradle :app:assembleRelease      # R8-minified, ~2.3 MB
 ```
+
+Release builds are signed when `android/keystore.properties` exists (see
+`keystore.properties.example`); without it they build unsigned rather than
+failing.
 
 The vision fallback is optional and off unless you point it somewhere:
 
@@ -82,6 +87,17 @@ cd core
 python3 -m pytest -q         # 219 tests
 python3 -m blacktop.sim      # matched-baseline lift report
 ```
+
+## First run
+
+Start with [`docs/PHASE-0.md`](docs/PHASE-0.md). The parser's regexes have
+never met a real DoorDash accessibility tree, and **Reader diagnostics** in the
+app settles that in about ten minutes: enable the accessibility service, turn
+on recording, let one offer appear, and look at the raw text the tree actually
+handed over next to what the parser made of it.
+
+Everything downstream depends on that answer, and on the matched baseline the
+same document describes.
 
 ## On-device setup
 
