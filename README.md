@@ -15,66 +15,97 @@ shows: how long the food actually takes, and how far the dropoff strands you
 from the next offer.
 
 ```
-screenshot the offer card
+  offer card appears in DoorDash
         │
-        ▼  share sheet / drop / paste
-  Claude reads the fields                 web/src/server/extract.ts
-        │  confidence < 0.75 ──► no verdict, driver decides
-        ▼
-  five-term time model + hidden-tip estimate    web/src/domain/verdict.ts
-        │
-        ▼
-  compare against the dynamic reservation rate  web/src/domain/reservation.ts
-        │
-        ▼
-  TAKE IT · CLOSE · SKIP   + spoken           web/src/app/main.ts
+        ├─ accessibility node traversal ──────► parse ──┐   the fast path:
+        │  (text already in the a11y tree)              │   no screenshot,
+        │                                               │   no network
+        │  ✗ parse failed and it looked like a card     │
+        └─ screenshot ──► Claude vision ──────► parse ──┤   the resilience path:
+                                                        │   survives a redesign
+                                                        ▼
+                          confidence < 0.75 ──► no verdict, driver decides
+                                                        │
+                                                        ▼
+                     five-term time model + hidden-tip estimate
+                                                        │
+                                                        ▼
+                          compare vs. the dynamic reservation rate
+                                                        │
+                                                        ▼
+                     HUD over the app: one colour, one number, spoken
 ```
 
 ## What's here
 
 | Path | What it is | Verified |
 |---|---|---|
-| `web/` | The app: an installable, offline-first PWA. TypeScript, no UI framework. | 73 tests, typecheck, production build |
-| `core/` | Python reference implementation of every algorithm, plus the shift simulator that measures whether any of it works. Stdlib only. | 219 tests |
-| `db/schema.sql` | Postgres + PostGIS schema with row-level security, per PRD §8. | Parsed against the real PostgreSQL grammar |
+| `android/domain` | The engine. Pure Kotlin, no Android dependencies, unit-tests in a plain JVM. | 60 tests |
+| `android/app` | The client: capture, HUD overlay, TTS, consent, manual entry. | assembles debug + release (R8 clean) |
+| `server/` | Vision extraction endpoint. The only place an API key exists. | typecheck + 10 tests |
+| `core/` | Python reference implementation, plus the shift simulator that measures whether any of it works. Stdlib only. | 219 tests |
+| `db/schema.sql` | Postgres + PostGIS schema with row-level security, per PRD §8. | parsed by libpg_query |
 | `docs/` | PRD, architecture, compliance invariants, simulation findings. | — |
 
-The Python core is the semantic source of truth; `web/src/domain` is a port of
-it. Keeping both is deliberate — the simulator needs to run tens of thousands
-of shifts offline, and that is not something to do in a browser.
+`core/` is the semantic source of truth; `android/domain` is a port of it.
+Keeping both is deliberate — the simulator replays tens of thousands of shifts
+to judge a policy change, which is not phone work.
 
-## Run it
+## Build
+
+The engine needs no Android SDK:
 
 ```bash
-cd web
-npm install
-export ANTHROPIC_API_KEY=sk-ant-...   # server-side only; see web/.env.example
-npm run dev                           # http://localhost:5173
-npm test                              # 73 tests
-npm run build
+cd android
+gradle :domain:test          # 60 tests
 ```
 
-Install it to the home screen on Android to register BLACKTOP in the share
-sheet. Then the loop is: screenshot the offer → share → verdict, spoken.
+The app does. With `ANDROID_HOME` set (or `sdk.dir` in `local.properties`):
+
+```bash
+gradle :app:assembleDebug
+gradle :app:assembleRelease  # R8-minified, ~2.3 MB
+```
+
+The vision fallback is optional and off unless you point it somewhere:
+
+```bash
+cd server && npm install && export ANTHROPIC_API_KEY=sk-ant-... && npm run dev
+cd ../android
+gradle :app:assembleDebug -PextractEndpoint=http://10.0.2.2:8787/api/extract
+```
 
 The measurement harness:
 
 ```bash
 cd core
-python3 -m pytest -q                  # 219 tests
-python3 -m blacktop.sim               # matched-baseline lift report
+python3 -m pytest -q         # 219 tests
+python3 -m blacktop.sim      # matched-baseline lift report
 ```
+
+## On-device setup
+
+Three grants, each explained in-app before it is requested:
+
+1. **Accessibility** — lets the reader see the offer card. Read-only: the
+   service declares `canRetrieveWindowContent` and no gesture capability, and
+   is pinned to delivery app package names.
+2. **Draw over other apps** — the HUD. It sets `FLAG_NOT_TOUCHABLE`, so taps
+   pass through and it can never intercept your accept button.
+3. **Screen capture** — optional, only for the vision fallback.
+
+Manual entry works with none of them granted.
 
 ## Does it actually work?
 
 The PRD makes this falsifiable — Phase 3 exits only on ≥15% measured lift — so
 the simulator was built before the optimizer. It generates a North/Central NJ
-market that holds ground truth, reproduces the offer card's three distortions,
-and replays the identical offer stream against both policies.
+market holding ground truth, reproduces the offer card's three distortions, and
+replays the identical offer stream against both policies.
 
 Over a 20-day matched season after a 5-day Phase 0 warm-up:
 
-| zone | baseline $2/mi | BLACKTOP | lift | share of the achievable gain |
+| zone | baseline $2/mi | BLACKTOP | lift | share of achievable gain |
 |---|---|---|---|---|
 | Paramus / Rt 17 | $10.27/hr | $12.14/hr | **+18.3%** | 88% |
 | Morristown / Chatham | $14.73/hr | $15.29/hr | **+3.8%** | 68% |
@@ -91,27 +122,30 @@ Running that harness also found three defects in the reservation rate, each of
 which silently collapsed it back into a fixed threshold while every unit test
 passed. [`docs/SIMULATION.md`](docs/SIMULATION.md) has the details.
 
-## What this version does not do
+## The risk you are taking
 
-The PRD specifies an Android app that reads the offer card off the screen
-automatically and floats a verdict over it. A PWA cannot do either: it cannot
-observe another app's rendered content, and it cannot draw over one. So capture
-is a screenshot the driver shares, not a silent read, and the verdict appears
-in the app rather than on top of DoorDash.
+Reading the offer card on your own device is not something any delivery
+platform has explicitly permitted. It touches no platform server and uses no
+credentials, which makes it materially different from tools that have been shut
+down — but it is not blessed either. The app says so in plain language before
+anything is enabled, and manual entry exists so the product still works for a
+driver who declines. [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) states each
+invariant and where the code holds it.
 
-That costs the sub-400ms budget in PRD §4 — a vision round trip is seconds, not
-milliseconds, though it fits inside a 30–45 second timer. What it buys is the
-compliance position: no accessibility service, no screen reading, no overlay,
-and therefore none of the gray zone PRD §5.1 identifies as the product's
-largest risk. See [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md).
+Distribution likely means a direct APK rather than Play Store: accessibility
+services used for non-accessibility purposes need strong justification, and
+PRD §11 budgets for that fight.
 
-Also not built: the zone map (F3), building intel (F5), multi-app (F8), weather
-(F9), calendar (F10), parking shield (F11). F3, F4, F5, F7, and F13 exist in
-`core/` and are exercised by the simulator, but only F1, F2, F4, F6, and F7 are
-wired into the app.
+## Not built
+
+F3 (zone map), F5 (building intel), and F13 (counterfactual replay) exist in
+`core/` and run in the simulator but are not wired into the app. F8–F11
+(multi-app, weather, calendar, parking shield) are not implemented.
+`db/schema.sql` is written and parse-verified, but nothing syncs to it — the
+app is local-only, logging offers to app-private storage.
 
 ## Not tax advice
 
-`web/src/domain/mileageTax.ts` applies the 2026 split rate (72.5¢/mi through
+`core/blacktop/mileage_tax.py` applies the 2026 split rate (72.5¢/mi through
 June 30, 76¢ from July 1) and estimates SE, federal, and NJ tax for planning.
 It is not a substitute for an accountant.
