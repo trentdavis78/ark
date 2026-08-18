@@ -1,85 +1,113 @@
-# BLACKTOP — Architecture
+# Architecture
 
-This document maps the repository to the system described in `PRD.md` §7. It covers the
-module layout, data flow, and the relationship between the **Python reference
-implementation** (`core/`) and the **Android client** (`android/`).
+Maps this repository to the system in [`PRD.md`](PRD.md) §7, and records where
+it deliberately departs from it.
 
-## High-level shape
+## The departure
 
-BLACKTOP is an offline-first, on-device decision engine. All inference runs locally on the
-driver's phone; the backend exists only for durable sync, model retraining, and model
-artifact distribution. The verdict path never touches the network.
+The PRD specifies an Android client because the core feature — reading the
+offer card off the screen and floating a verdict over it — is impossible on
+iOS. This repository ships a PWA instead, which cannot do either of those
+things on any platform.
+
+What replaces silent capture is a screenshot the driver shares. What replaces
+the overlay is the app itself. The cost is PRD §4's sub-400ms budget: a vision
+round trip is seconds, not milliseconds. It still lands inside a 30–45 second
+offer timer, but it is a different interaction — three taps, not zero.
+
+What it buys is the compliance position. No accessibility service, no screen
+reading, no overlay, and therefore none of the gray zone PRD §5.1 identifies as
+the product's largest risk. See [`COMPLIANCE.md`](COMPLIANCE.md).
+
+## Flow
 
 ```
-offer appears on screen
+  driver screenshots the offer card
+        │
+        │  Android share sheet ──► service worker POST catch ──► /?shared=1
+        │  or drag-drop / paste / file picker
+        ▼
+  POST /api/extract  { imageBase64, mediaType }        web/src/server/extract.ts
+        │                                              (server-side: the API key
+        │                                               must never reach a browser)
+        ▼
+  claude-opus-5, output constrained to a zod schema    web/src/vision/schema.ts
+        │
+        │  confidence < 0.75, or no payout, or not an offer card
+        │       └──► no verdict. The driver decides, and is told why.
+        ▼
+  ExtractedOffer ──► Offer                             web/src/vision/client.ts
         │
         ▼
-  capture (AccessibilityService node read | MediaProjection+OCR)   ── android/capture
+  five-term time model                                 web/src/domain/verdict.ts
+    drive to merchant + merchant wait (F4)
+      + drive to customer + dropoff friction
+      + return to density  ← the deadhead nobody models
         │
         ▼
-  parse (field extraction + confidence score)                      ── core/parser.py, android/parse
-        │  low confidence ──► manual-entry fallback (I6)           ── android/ui/ManualEntryScreen
-        ▼
-  enrich (merchant wait, building friction, zone deadhead)         ── core/{merchant_oracle,building_intel,zone_map}.py
+  E[payout] = displayed + E[hidden tip | features]     web/src/domain/tipEstimator.ts
         │
         ▼
-  value + time model → E[$/hr]                                     ── core/verdict.py, core/tip_estimator.py
+  compare vs. w*(now, context)                         web/src/domain/reservation.ts
         │
         ▼
-  compare vs. dynamic reservation rate w*                          ── core/reservation.py
-        │
-        ▼
-  Verdict {GREEN|AMBER|RED, $/hr, threshold, TTS line}             ── android/overlay (HUD + TTS)
+  Verdict {green|amber|red|manual_fallback}            web/src/app/main.ts
+    one colour, one number, one spoken line
 ```
+
+Everything after extraction is local and works offline. Extraction needs the
+network; when it is unavailable the app says so rather than guessing.
 
 ## Repository map
 
-| Path | Role | Verified here? |
+| Path | Role | Verified here |
 |---|---|---|
-| `core/` | Python 3.11 reference implementation of every algorithm. Stdlib-only. The semantic source of truth; the Kotlin engine is a port of these files. | Yes — full pytest suite |
-| `core/blacktop/models.py` | Shared dataclasses/enums used by every module (Offer, Verdict, Session, Merchant, Building, ZoneStats, VehicleCostParams, TaxParams, …). | Yes |
-| `core/blacktop/verdict.py` | F1 Offer Verdict Engine: time model (5-term T_total incl. `T_return_to_density`), value model, verdict emission with parse-confidence gating. | Yes |
-| `core/blacktop/tip_estimator.py` | F2 Hidden-Tip Estimator: hierarchical partial pooling (market → category → merchant), display-cap detector, `hit_display_cap` boost. | Yes |
-| `core/blacktop/zone_map.py` | F3 Zone Alpha Map: pluggable hex index (pure-python grid; H3 drop-in later), quality-density stats, positioning recommendation, seam detection, deadhead surface. | Yes |
-| `core/blacktop/merchant_oracle.py` | F4 Merchant Wait Oracle: streaming P50/P90 per location × hour-of-week with sparse-data fallback, chronic-offender flag, bounded arrival-timing advice. | Yes |
-| `core/blacktop/building_intel.py` | F5 Last-100-Feet Intel: knowledge base keyed by building, friction estimation, preset-tap and free-text note capture, share-gating (I5/F14 rules). | Yes |
-| `core/blacktop/reservation.py` | F6 Dynamic Reservation Rate: renewal-reward optimal-stopping fixed point, session-end decay, AR-farming policy layer, guardrails, sanity band clamp. | Yes |
-| `core/blacktop/mileage_tax.py` | F7 Mileage & Tax: 2026 split IRS rate (72.5¢ ≤ Jun 30, 76¢ ≥ Jul 1), audit log, true net, shielded income counter, SE tax, 1040-ES + NJ-1040-ES, vehicle cost model. | Yes |
-| `core/blacktop/parser.py` | Offer-card text → structured `ParsedOffer` with per-field confidence; manual-entry constructor (I6). | Yes |
-| `core/blacktop/counterfactual.py` | F13 threshold counterfactual replay over the logged offer stream, threshold sweep report. | Yes |
-| `android/` | Kotlin/Jetpack Compose client. Source-complete; **not compiled in this environment** (no Android SDK/Gradle here). | Written, unverified |
-| `backend/supabase/` | Postgres+PostGIS migration for PRD §8 tables with RLS keyed to `driver_id`; edge function stubs (sync ingest, model artifact signed URL). | Written, unverified |
-| `ml/` | LightGBM training + ONNX export pipeline for F2; feature engineering shared with core. Tests skip gracefully when lightgbm/onnx are absent. | Yes (guarded) |
+| `web/src/domain/` | The engine. No DOM, no network, no storage — pure functions over value objects. | 54 tests |
+| `web/src/vision/` | Schema shared by server and client; screenshot → `Offer` conversion. | 19 tests |
+| `web/src/server/extract.ts` | The only place an API key exists. Fetch-standard handler. | typecheck; bundle asserted key-free |
+| `web/src/app/` | UI, IndexedDB persistence, session state wiring the learned models together. | typecheck, production build |
+| `web/public/sw.js` | Offline shell + the share-target POST catcher. | — |
+| `core/blacktop/` | Python reference implementation of every algorithm, stdlib only. Semantic source of truth. | 219 tests |
+| `core/blacktop/sim/` | The shift simulator: generative NJ market, matched-baseline runner, clairvoyant ceiling. | included above |
+| `db/schema.sql` | Postgres + PostGIS + RLS, per PRD §8. Not yet wired to the app. | parsed by libpg_query |
 
-## Android module map (`android/app/src/main/java/com/blacktop/app/`)
+## Why two implementations
 
-- `capture/` — `OfferCaptureAccessibilityService` (**read-only** node traversal; no
-  `performAction` ever — I3), `ScreenCaptureManager` (MediaProjection scaffold).
-- `parse/` — ML Kit OCR wrapper + `OfferCardParser`, a faithful port of `core/blacktop/parser.py`.
-- `engine/` — Kotlin ports of `verdict.py`, `reservation.py`, and tip-estimator inference
-  (ONNX Runtime Mobile at runtime; pooled-prior fallback before the model ships).
-- `data/` — Room entities/DAOs mirroring PRD §8 tables 1:1.
-- `overlay/` — HUD bubble, verdict rendering (one colored number vs. threshold), TTS.
-- `tracking/` — foreground-service GPS session logger, geofence dwell tracker (feeds F4/F7).
-- `ui/` — Compose screens: dashboard, **manual entry (first-class, I6)**, session, settings,
-  informed-consent screen gating screen-reading enable.
+`core/` is Python and `web/src/domain` is TypeScript, and they implement the
+same algorithms. That duplication is deliberate and bounded.
 
-## Data flow and caching
+The simulator has to replay tens of thousands of shifts to say anything useful
+about a policy, and it needs to be trivially scriptable. That is not browser
+work. So `core/` is where a change to the decision math gets *judged* — the
+zone-level lift assertions in `core/tests/test_sim.py` are what catch a
+regression that unit tests miss — and `web/src/domain` is the port that ships.
 
-- **Routing cache is load-bearing** (PRD §7): the reference engine takes travel times as
-  injected inputs (`RouteProvider` protocol) so the Android client can back it with a
-  cached matrix + live routing, and tests can drive it deterministically.
-- **Every offer is an observation**: declines are logged and feed `zone_map` and
-  `counterfactual` exactly like accepts.
-- **Sync** is batched and offline-tolerant; the Supabase edge function ingests rows and
-  RLS scopes everything to `driver_id`.
+The risk is drift. The mitigation is that both sides carry the same tests for
+the same properties, in the same order, with the same names, so a change on one
+side that is not mirrored shows up as a missing test rather than a silent
+divergence.
 
-## Deliberate reference-implementation simplifications
+## The reservation rate
 
-- The hex index is a pure-python equal-area-ish grid (`GridHexIndex`) behind a `HexIndex`
-  protocol; production swaps in H3 res-8/9 without touching zone logic.
-- The tip model in `core/` is the partial-pooling estimator (the cold-start path in the
-  PRD); the LightGBM/ONNX pipeline in `ml/` is the trained-model path and shares the F2
-  feature list via `ml/features.py`.
-- Routing, weather, and geocoding are injected interfaces, not live calls (offline-first,
-  and no network in tests).
+`web/src/domain/reservation.ts` and `core/blacktop/reservation.py` are the
+subtlest part of the system, and four of their properties are load-bearing.
+Each was established by measuring a policy that lacked it; each failure mode
+was the same — the engine silently degenerating into the fixed threshold it
+exists to replace. [`SIMULATION.md`](SIMULATION.md) has the measurements.
+
+1. **The sanity band diagnoses, never clamps.** Clamping to the band floor
+   declines every offer a lean market can produce.
+2. **The window survives starvation.** A working driver sees few offers, so the
+   window reaches back for a minimum sample count and pools toward a learned
+   prior rather than snapping to a constant.
+3. **Windows are keyed by context.** One market must not set another's
+   threshold.
+4. **λ counts minutes available, not elapsed.** Offers arriving mid-delivery
+   are never seen; ignoring that depresses the threshold and over-accepts.
+
+## Not built
+
+`db/schema.sql` exists but nothing syncs to it — the app is local-only, storing
+offers and sessions in IndexedDB. F3 (zone map), F5 (building intel), and F13
+(counterfactual replay) exist in `core/` and are exercised by the simulator but
+are not wired into the app. F8–F11 are not implemented at all.

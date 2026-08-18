@@ -1,76 +1,125 @@
-# BLACKTOP — Compliance: the invariants and how the code enforces them
+# Compliance: the invariants, and how the code holds them
 
-PRD §5.1 defines six non-negotiable invariants. This document states, for each, where and
-how this codebase enforces it. Reviewers should treat any diff that weakens one of these
-as release-blocking.
+PRD §5.1 defines six non-negotiable invariants. This states, for each, where
+the codebase enforces it. A diff that weakens one is release-blocking.
+
+The reasoning behind them is worth restating, because it explains the shape of
+the whole product. Para's tip-transparency feature took drivers' DoorDash
+credentials and parsed the payout out of the JSON sent to the device. DoorDash
+removed the payout from the payload and the product never recovered. The lesson
+is not "don't do useful things" — it is that any capability depending on a
+platform's cooperation, credentials, or server responses can be revoked
+unilaterally and without notice.
+
+## Where this build stands
+
+The PRD accepts one residual risk: on-device reading of the offer card via OCR
+or accessibility services is a gray zone. It touches no platform server and
+uses no credentials, but it is not blessed by any platform's terms, and PRD
+§5.1 calls invariant I6 — the manual fallback — "the risk hedge for the entire
+product."
+
+**This build does not take that risk.** There is no accessibility service, no
+screen reading, and no overlay, because a PWA cannot do any of them. Input is a
+screenshot the driver took of their own screen and chose to share. The gray
+zone is not mitigated here; it is absent.
+
+That is not a free win. It costs the sub-400ms verdict and the zero-touch
+shift, both of which the PRD treats as core. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## I1 — No platform credentials are requested, transmitted, or stored
 
-- There is no login flow, credential field, token store, or OAuth client for any delivery
-  platform anywhere in `android/` or `backend/`.
-- The Room schema (`android/.../data/`) and the SQL migration
-  (`backend/supabase/migrations/0001_init.sql`) contain no credential columns.
-- Supabase auth authenticates the **driver to BLACKTOP's own backend** only.
+No login flow, credential field, token store, or OAuth client for any delivery
+platform exists anywhere in this repository. `db/schema.sql` has no credential
+column on any table. Platform names appear only as enum labels on the driver's
+own observations (`"doordash"`, `"uber_eats"`, `"grubhub"`).
+
+The one secret in the system is BLACKTOP's own Anthropic API key. It lives
+server-side in `web/src/server/extract.ts` and never reaches the browser; the
+build is checked to confirm neither the SDK nor key material appears in the
+client bundle.
 
 ## I2 — No network requests to platform servers
 
-- Grep-clean guarantee: no code references doordash/uber/grubhub domains or endpoints.
-  Platform names appear only as enum labels on the driver's own observations
-  (`Platform.DOORDASH` etc.).
-- All platform data enters exclusively via what is already rendered on the driver's own
-  screen (accessibility node text / OCR text) or via manual entry.
-- The core engine (`core/blacktop/`) performs no I/O at all: stdlib-only, no sockets, no
-  HTTP client imports.
+Grep-clean: no code references a doordash, uber, or grubhub domain or endpoint.
+
+The app makes exactly two kinds of outbound request — its own origin for the
+app shell, and `POST /api/extract` to its own vision endpoint. That endpoint
+calls the Anthropic API and nothing else. All platform data enters as pixels in
+a screenshot the driver already had on their device.
+
+`web/src/domain/` performs no I/O of any kind: no `fetch`, no storage, no DOM.
+`core/blacktop/` is stdlib-only with no HTTP client imported anywhere.
 
 ## I3 — No synthetic input events
 
-- `OfferCaptureAccessibilityService` is **read-only**: it overrides `onAccessibilityEvent`
-  to traverse node text and never calls `performAction`, `dispatchGesture`,
-  `performGlobalAction`, or any input-injection API. The service config requests
-  `canRetrieveWindowContent` only — no gesture capability flags.
-- There is no code path from a `Verdict` to any injected interaction. The verdict flows to
-  `overlay/VerdictRenderer` and `overlay/TtsAnnouncer` and terminates there.
+There is nothing in this codebase that can tap anything. A web page cannot
+dispatch input to another application, and BLACKTOP does not attempt to
+automate its own UI either. `Verdict` is a value object that gets rendered and
+spoken; no code path consumes it to trigger an action.
+
+The accept and decline buttons in `web/src/app/main.ts` record what the driver
+*already did* in the platform app. They are inputs to the learning loop, not
+outputs to the platform.
 
 ## I4 — Advisory only
 
-- `Verdict` is a pure value object (`core/blacktop/models.py`); the engine's public API
-  returns it and nothing consumes it except rendering/audio.
-- UX shows the number **and** the threshold it was compared against (PRD §9.5) so the human
-  decides with context; BLACKTOP never acts.
+Every output is a recommendation displayed to a human who then acts. The UI
+states this on screen. `VerdictEngine.evaluate` returns a colour, a number, and
+a spoken line; the driver taps in DoorDash.
+
+The confidence gate matters here too. Below 0.75 extraction confidence the
+engine returns `manual_fallback` with **no** projected hourly attached — not a
+low-confidence number, no number. A fabricated distance produces a confident
+wrong verdict, which is worse for a driver than no verdict, so a missing payout
+produces no offer at all rather than an offer with a zero in it.
 
 ## I5 — All learned data is the driver's own observation of their own work
 
-- Every learned store (merchant waits, building intel, zone stats, tip labels) is written
-  only from the driver's own sessions. RLS in `0001_init.sql` keys every table to
-  `driver_id = auth.uid()`, so one driver can never read another's rows.
-- Gate codes are encrypted at rest (`gate_code_encrypted`; the migration documents pgsodium
-  usage). `buildings.shareable` defaults `false` and may only flip true for commercial /
-  multi-unit properties on explicit opt-in — enforced by a CHECK + trigger in the
-  migration and by `building_intel.py::BuildingIntel.set_shareable`, which refuses
-  single-family residences.
+Every model in the system trains on the driver's own completed deliveries:
 
-## I6 — Manual-entry fallback mode ships in v1 and works standalone
+- **F2 tip estimator** — the label is the driver's actual payout minus what
+  their card displayed.
+- **F4 merchant wait** — the driver's own dwell time at that location.
+- **F6 reservation rate** — the driver's own offers, declines included, and
+  their own session timeline (which is what makes the λ correction legitimate:
+  busy intervals come from the driver's clock, not the platform's).
+- **Display cap detection** — counting repeats in the driver's own offer
+  history. This is the highest-signal feature in the tip model and it requires
+  no privileged access whatsoever, which is exactly why it cannot be taken
+  away.
 
-- `core/blacktop/parser.py` exposes `manual_offer(...)` — a first-class structured entry
-  path producing the same `ParsedOffer` type at confidence 1.0.
-- `android/ui/ManualEntryScreen.kt` is reachable without enabling any capture permission;
-  the app is fully functional (verdicts, mileage, session tracking) with screen reading
-  disabled.
-- Confidence gating: `verdict.py` refuses to emit a verdict when parse confidence is below
-  `MIN_PARSE_CONFIDENCE` and instead returns a `MANUAL_FALLBACK` verdict directing the
-  driver to manual mode — a wrong verdict is worse than no verdict (PRD §11, parse-risk
-  row). Parse failures are telemetry: the parser returns machine-readable failure reasons.
+Storage is local (IndexedDB). Nothing syncs anywhere. `db/schema.sql` sets
+row-level security keyed to `driver_id` on every driver-scoped table for when
+it does.
 
-## Informed consent (PRD §11, row 1)
+Two rules in the schema are enforced by the database rather than by convention,
+because a client one typo away from leaking someone's door code is not a
+sufficient barrier: a trigger rejects `buildings.shareable` on single-family
+residences and on any row still carrying a gate code, and the
+`shared_buildings` view omits the gate-code column entirely.
 
-- `android/ui/ConsentScreen.kt` is a plain-language, explicit consent gate shown **before**
-  the accessibility service or MediaProjection can be enabled. It states the gray-zone risk
-  verbatim and offers manual mode as the alternative. Enabling capture without passing this
-  screen is not possible in the UI flow.
+## I6 — Manual-entry fallback ships in v1 and works standalone
 
-## Guardrails in the optimizer
+Partially held, and the gap is worth stating plainly.
 
-- `reservation.py` enforces the policy-constraint layer: completion-rate floor ≥95%
-  (never recommend an accept that risks an unassign), lateness avoidance bounds on
-  arrival-timing advice (`merchant_oracle.py`), and the sanity band clamp
-  ($0.30–$0.85 per projected minute) so upstream failures cannot produce absurd advice.
+The engine accepts a hand-built `Offer` — `makeOffer` in
+`web/src/domain/models.ts` — and the whole decision path runs on it with no
+vision involved. The Python core exposes `manual_offer()` for the same purpose
+and it is tested.
+
+But the shipped UI has no manual-entry form. If the vision endpoint is
+unreachable, the driver currently gets a clear failure and no way to score the
+offer by hand. Given that this build's *only* input path is vision, that makes
+the fallback more important here than the PRD envisaged, not less. It is the
+first thing to add.
+
+## What a reviewer should check
+
+- No credential field, token store, or platform login appears anywhere.
+- No platform domain is referenced in any request.
+- `web/src/domain/` and `core/blacktop/` remain I/O-free.
+- No code path acts on a `Verdict` other than rendering or speaking it.
+- The confidence gate still refuses to emit a number below threshold.
+- The API key still does not appear in the client bundle.
