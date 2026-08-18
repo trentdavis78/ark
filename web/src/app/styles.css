@@ -1,0 +1,125 @@
+/*
+ * One glance, one colour (PRD §9.1).
+ *
+ * The driver is holding a phone in a mount, often in direct sun, and has under
+ * a second of visual attention to spare. So: near-black ground, one enormous
+ * number, and a verdict colour that reads before any text does. Nothing here
+ * is decorative.
+ */
+
+:root {
+  --ground: #0b0d0f;
+  --panel: #14181c;
+  --line: #232a31;
+  --ink: #f2f5f7;
+  --ink-dim: #97a3ad;
+  --green: #2ecc71;
+  --amber: #f5c518;
+  --red: #ff4d4d;
+  --blue: #4da3ff;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--ground);
+  color: var(--ink);
+  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+#app {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 1rem 1rem calc(1rem + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.brand { font-weight: 800; letter-spacing: .14em; font-size: .8rem; color: var(--ink-dim); }
+.online-dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--ink-dim); }
+.online-dot[data-on="true"] { background: var(--green); }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1rem;
+}
+
+/* The verdict. This is the product. */
+.verdict { text-align: center; padding: 1.5rem 1rem; border-width: 2px; }
+.verdict[data-color="green"] { border-color: var(--green); }
+.verdict[data-color="amber"] { border-color: var(--amber); }
+.verdict[data-color="red"] { border-color: var(--red); }
+.verdict[data-color="manual_fallback"] { border-color: var(--ink-dim); }
+
+.verdict-word {
+  font-size: clamp(2.6rem, 15vw, 4.2rem);
+  font-weight: 900;
+  letter-spacing: -.02em;
+  line-height: 1;
+  margin: 0;
+}
+.verdict[data-color="green"] .verdict-word { color: var(--green); }
+.verdict[data-color="amber"] .verdict-word { color: var(--amber); }
+.verdict[data-color="red"] .verdict-word { color: var(--red); }
+.verdict[data-color="manual_fallback"] .verdict-word { font-size: clamp(1.5rem, 8vw, 2.2rem); }
+
+/* Never a number without what it is compared against (PRD §9.5). */
+.verdict-compare { font-size: 1.5rem; font-weight: 700; margin: .5rem 0 0; }
+.verdict-compare .against { color: var(--ink-dim); font-weight: 500; }
+.verdict-sub { color: var(--ink-dim); font-size: .9rem; margin: .35rem 0 0; }
+
+/* The invisible costs are the whole reason this exists (PRD §9.6). */
+.costs { display: grid; grid-template-columns: repeat(2, 1fr); gap: .5rem; margin-top: 1rem; }
+.cost { background: #0f1317; border: 1px solid var(--line); border-radius: 10px; padding: .55rem; }
+.cost b { display: block; font-size: 1.1rem; }
+.cost span { color: var(--ink-dim); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
+.cost[data-hidden="true"] { border-color: #4a3a12; }
+
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
+button {
+  font: inherit;
+  font-weight: 700;
+  color: var(--ink);
+  background: #1b2229;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: .95rem 1rem;
+  cursor: pointer;
+  /* Big targets: this is tapped one-handed, in a moving vehicle. */
+  min-height: 3.25rem;
+}
+button:active { transform: translateY(1px); }
+button.primary { background: var(--blue); border-color: var(--blue); color: #04121f; }
+button.go { background: var(--green); border-color: var(--green); color: #04160b; }
+button.stop { background: #2a1417; border-color: var(--red); color: var(--red); }
+button[disabled] { opacity: .5; cursor: not-allowed; }
+button.wide { grid-column: 1 / -1; }
+
+.dropzone {
+  border: 2px dashed var(--line);
+  border-radius: 14px;
+  padding: 1.6rem 1rem;
+  text-align: center;
+  color: var(--ink-dim);
+}
+.dropzone.hot { border-color: var(--blue); color: var(--ink); }
+
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; }
+.stat b { display: block; font-size: 1.25rem; }
+.stat span { color: var(--ink-dim); font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; }
+
+.notes { margin: .6rem 0 0; padding-left: 1.1rem; color: var(--ink-dim); font-size: .78rem; }
+.notes li { margin: .15rem 0; }
+.muted { color: var(--ink-dim); font-size: .85rem; }
+.error { color: var(--red); font-size: .9rem; }
+h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .1em; color: var(--ink-dim); margin: 0 0 .6rem; }
+.spinner { color: var(--blue); font-weight: 700; }
+.hidden { display: none; }
