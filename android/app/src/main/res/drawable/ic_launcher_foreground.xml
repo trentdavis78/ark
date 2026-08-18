@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A road with a lane marking and an upward wedge: the surface the work
+     happens on, and the direction the numbers are supposed to move. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M30,74h48"
+        android:strokeColor="#3D4147"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M38,74h6M52,74h6M66,74h6"
+        android:strokeColor="#F5C518"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,32L67,60H41z"
+        android:fillColor="#2ECC71" />
+</vector>

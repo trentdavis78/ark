@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Read-only capture configuration.
+
+  canRetrieveWindowContent is the only capability requested. There is no
+  flagRequestTouchExplorationMode, no gesture dispatch, and no capability that
+  would let this service act on the driver's behalf — enforcing invariant I3 at
+  the manifest level, where a reviewer can check it without reading any code.
+
+  packageNames is pinned to the delivery apps so the service is never handed
+  content from the driver's banking app, messages, or anything else.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="100"
+    android:packageNames="com.dd.doordash,com.ubercab.driver,com.grubhub.android.driver"
+    android:description="@string/accessibility_description"
+    android:settingsActivity="com.blacktop.ui.MainActivity" />
